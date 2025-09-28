@@ -1,0 +1,3 @@
+[submodule "CGTIER"]
+	path = CGTIER
+	url = https://github.com/cslabcbnu/CGTIER.git
