@@ -1,0 +1,8 @@
+[General]
+name='Test_dyn1'
+image='ubuntu'
+-itd
+
+[Memory_Control]
+type=dynamic
+memory_limit=130g
