@@ -7,6 +7,9 @@ import configparser
 import glob
 import time
 from datetime import datetime
+import sys
+import select
+import argparse
 
 def parse_nodelist(nodelist_str):
     nodes = set()
@@ -70,7 +73,7 @@ def apply_memory_tiers(container_id, settings_to_apply):
             full_path = os.path.join(cgroup_path, file_name)
             if not os.path.exists(full_path):
                 print(f"[Alert] Cgroup file not found: {file_name}"); continue
-            print(f"[Info]    - Writing {int(byte_value)} bytes to {file_name}...")
+            print(f"[Info]     - Writing {int(byte_value)} bytes to {file_name}...")
             with open(full_path, 'w') as f: f.write(str(int(byte_value)))
         except PermissionError: print(f"[Error] Permission denied for {full_path}. Use sudo.")
         except Exception as e: print(f"[Error] Failed to apply setting for {file_name}: {e}")
@@ -113,6 +116,42 @@ def rebalance_dynamic_memory(dynamic_containers, fixed_containers, system_tiers)
             settings = {"memory.tiered_memory_0_high": tier0_alloc, "memory.tiered_memory_1_high": tier1_alloc}
             apply_memory_tiers(c['id'], settings)
 
+def cleanup_old_backup_images(container_name):
+    print(f"[Info] Cleaning up old backup images for '{container_name}'...")
+    pattern = f"{container_name.lower()}_*"
+    
+    format_str = "{{.Repository}}\t{{.CreatedAt}}"
+    find_cmd = ['docker', 'images', '--filter', f'reference={pattern}', '--format', format_str]
+    result = subprocess.run(find_cmd, capture_output=True, text=True, encoding='utf-8')
+    
+    if result.returncode != 0 or not result.stdout.strip():
+        print("[Info] No backup images found to clean up.")
+        return
+
+    images = []
+    for line in result.stdout.strip().split('\n'):
+        repo, created_at = line.split('\t')
+        images.append((created_at, repo))
+    
+    images.sort()
+
+    images_to_delete = [repo for _, repo in images[:-1]]
+    
+    if not images_to_delete:
+        print("[Info] Only one backup image exists. No cleanup needed.")
+        return
+
+    print(f"[Info] Found {len(images_to_delete)} old backup image(s) to delete.")
+    
+    rmi_cmd = ['docker', 'rmi'] + images_to_delete
+    delete_result = subprocess.run(rmi_cmd, capture_output=True, text=True, encoding='utf-8')
+
+    if delete_result.returncode == 0:
+        print("[Info] Successfully deleted old backup images.")
+    else:
+        print(f"[Warning] Could not delete old backup images. Error: {delete_result.stderr.strip()}")
+
+
 def run_docker_containers(directory='./Containers.d'):
     if not os.path.isdir(directory): print(f"[Error] Directory '{directory}' not found."); return
     
@@ -153,7 +192,7 @@ def run_docker_containers(directory='./Containers.d'):
             
             def handle_running_container(name, current_config):
                 info = get_container_info(name)
-                if not (info and info['State']['Running']): time.sleep(1); info = get_container_info(name) # Wait a moment for state to update
+                if not (info and info['State']['Running']): time.sleep(1); info = get_container_info(name)
                 if not (info and info['State']['Running']): print(f"[Error] Container '{name}' failed to enter running state."); return
 
                 if system_memory_tiers and current_config.has_section('Memory_Control'):
@@ -183,7 +222,7 @@ def run_docker_containers(directory='./Containers.d'):
                 if existing_info['Config']['Labels'].get('config.hash') == current_config_hash:
                     if existing_info['State']['Running']:
                         print(f"[Info] Container '{container_name}' is up-to-date and running.")
-                        handle_running_container(container_name, config) # Re-apply memory settings on script run
+                        handle_running_container(container_name, config)
                     else:
                         result = subprocess.run(['docker', 'start', container_name], capture_output=True, text=True)
                         if result.returncode == 0:
@@ -194,9 +233,13 @@ def run_docker_containers(directory='./Containers.d'):
                     print(f"[Info] Config for '{container_name}' changed. Recreating.")
                     timestamp = datetime.now().strftime('%Y%m%d%H%M%S'); backup_image_name = f"{container_name.lower()}_{timestamp}"
                     try:
-                        if existing_info['State']['Running']: subprocess.run(['docker', 'stop', container_name], check=True, capture_output=True)
+                        if existing_info['State']['Running']:
+                            subprocess.run(['docker', 'stop', container_name], check=True, capture_output=True)
                         subprocess.run(['docker', 'commit', '-p', container_name, backup_image_name], check=True, capture_output=True)
+                        print(f"[Info] Created new backup image: {backup_image_name}")
                         subprocess.run(['docker', 'rm', container_name], check=True, capture_output=True)
+                        print(f"[Info] Removed old container '{container_name}'.")
+                        cleanup_old_backup_images(container_name)
                         command = ['docker', 'run', '--label', f'config.hash={current_config_hash}', '--name', container_name] + [item for opt in standalone_options for item in opt.split()] + [backup_image_name]
                         result = subprocess.run(command, capture_output=True, text=True)
                         if result.returncode == 0:
@@ -212,5 +255,153 @@ def run_docker_containers(directory='./Containers.d'):
 
     print("=" * 30 + f"\n[Info] Summary: Recognized {recognized_configs} configurations, managed {containers_started} containers.\n" + "=" * 30)
 
+def get_container_names_from_configs(directory='./Containers.d'):
+    if not os.path.isdir(directory):
+        print(f"[Error] Directory '{directory}' not found.")
+        return []
+        
+    names = []
+    all_filepaths = [os.path.join(directory, f) for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    for filepath in all_filepaths:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                all_lines = f.readlines()
+
+            config_lines = []
+            for line in all_lines:
+                stripped = line.strip()
+                if stripped.startswith('[') or '=' in stripped or not stripped:
+                    config_lines.append(line)
+
+            config = configparser.ConfigParser()
+            config.read_string("".join(config_lines)) # Read only the filtered lines
+
+            if config.has_option('General', 'name'):
+                names.append(config.get('General', 'name').strip("'\""))
+        except configparser.Error as e:
+            print(f"[Alert] Could not properly parse '{os.path.basename(filepath)}': {e}")
+
+    return names
+
+def monitor_containers(to_screen, to_file):
+    print("=" * 30 + "\n[Info] Starting Memory Tier Monitoring Mode\n" + "=" * 30)
+    
+    container_names = get_container_names_from_configs()
+    if not container_names:
+        print("[Alert] No containers found in configuration files to monitor.")
+        return
+
+    log_file_handler = None
+    if to_file:
+        log_filename = f"memory_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_file_handler = open(log_filename, 'w', encoding='utf-8')
+        print(f"[Info] Logging to file: {log_filename}")
+
+    print("Press 'q' then 'Enter' to quit.\n")
+    
+    container_id_cache = {} 
+    files_to_monitor = ["memory.tiered_memory_0_current", "memory.tiered_memory_1_current"]
+
+    try:
+        while True:
+            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                line = sys.stdin.readline()
+                if 'q' in line:
+                    break
+            
+            output_lines = []
+            output_lines.append(f"--- {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+
+            for name in container_names:
+                container_id = container_id_cache.get(name)
+                if not container_id:
+                    info = get_container_info(name)
+                    if info and info['State']['Running']:
+                        container_id = info['Id']
+                        container_id_cache[name] = container_id
+                    else:
+                        output_lines.append(f"{name}: Not running or not found.")
+                        continue
+                
+                cgroup_path = f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope/"
+                for filename in files_to_monitor:
+                    try:
+                        with open(os.path.join(cgroup_path, filename), 'r') as f:
+                            value = f.read().strip()
+                            output_lines.append(f"{name}.{filename}: {int(value):,}")
+                    except FileNotFoundError:
+                        if filename == "memory.tiered_memory_1_current": continue
+                        output_lines.append(f"{name}.{filename}: File not found.")
+                    except (IOError, PermissionError) as e:
+                        output_lines.append(f"{name}.{filename}: Error reading file - {e}")
+            
+            output_lines.append("-" * 30)
+            output_string = "\n".join(output_lines)
+            
+            if to_screen:
+                os.system('cls' if os.name == 'nt' else 'clear')
+                print(output_string)
+                print("\nPress 'q' then 'Enter' to quit.")
+
+            if to_file and log_file_handler:
+                log_file_handler.write(output_string + "\n\n")
+                log_file_handler.flush()
+            
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n[Info] Monitoring stopped by user.")
+    finally:
+        if log_file_handler:
+            log_file_handler.close()
+            print("[Info] Log file closed.")
+        print("[Info] Exiting monitoring mode.")
+
+def terminate_containers():
+    print("=" * 30 + "\n[Info] Terminating All Managed Containers\n" + "=" * 30)
+    
+    container_names = get_container_names_from_configs()
+    if not container_names:
+        print("[Alert] No containers found in configuration files to terminate.")
+        return
+
+    for name in container_names:
+        print(f"[Info] Processing container '{name}'...")
+        
+        stop_result = subprocess.run(['docker', 'stop', name], capture_output=True, text=True)
+        if stop_result.returncode == 0:
+            print(f"  - Success: Stopped container '{name}'.")
+        else:
+            if "No such container" in stop_result.stderr:
+                print(f"  - Info: Container '{name}' was not running.")
+            else:
+                print(f"  - Warning: Could not stop container '{name}'.\n    Error: {stop_result.stderr.strip()}")
+        
+        print("-" * 30)
+    
+    print("[Info] Termination process complete.")
+
+
 if __name__ == '__main__':
-    run_docker_containers()
+    
+    parser = argparse.ArgumentParser(
+        description="A tool to manage and monitor Docker containers with specific controls for tiered memory systems.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""Usage examples:
+  sudo python3 FATE.py               # Start/update containers based on config files.
+  sudo python3 FATE.py -m            # Monitor memory usage on the screen.
+  sudo python3 FATE.py -m -f         # Monitor on screen AND log to a file.
+  sudo python3 FATE.py -t            # Stop and remove all managed containers.
+  sudo python3 FATE.py --help        # Show this help message."""
+    )
+    parser.add_argument('-m', '--monitor', action='store_true', help='Monitor container memory usage on screen.')
+    parser.add_argument('-f', '--file', action='store_true', help='Log container memory usage to a file.')
+    parser.add_argument('-t', '--terminate', action='store_true', help='Stop and remove all managed containers.')
+    args = parser.parse_args()
+
+    if args.monitor or args.file:
+        monitor_containers(to_screen=args.monitor, to_file=args.file)
+    elif args.terminate:
+        terminate_containers()
+    else:
+        run_docker_containers()
