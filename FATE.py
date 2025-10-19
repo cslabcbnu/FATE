@@ -299,8 +299,7 @@ def monitor_containers(to_screen, to_file):
 
     print("Press 'q' then 'Enter' to quit.\n")
     
-    container_id_cache = {} 
-    files_to_monitor = ["memory.tiered_memory_0_current", "memory.tiered_memory_1_current"]
+    container_id_cache = {}
 
     try:
         while True:
@@ -324,16 +323,37 @@ def monitor_containers(to_screen, to_file):
                         continue
                 
                 cgroup_path = f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope/"
-                for filename in files_to_monitor:
-                    try:
-                        with open(os.path.join(cgroup_path, filename), 'r') as f:
-                            value = f.read().strip()
-                            output_lines.append(f"{name}.{filename}: {int(value):,}")
-                    except FileNotFoundError:
-                        if filename == "memory.tiered_memory_1_current": continue
-                        output_lines.append(f"{name}.{filename}: File not found.")
-                    except (IOError, PermissionError) as e:
-                        output_lines.append(f"{name}.{filename}: Error reading file - {e}")
+                numa_stat_file = os.path.join(cgroup_path, "memory.numa_stat")
+                
+                try:
+                    with open(numa_stat_file, 'r') as f:
+                        numa_stat_content = f.read()
+                    
+                    # node 0의 anon + file 계산
+                    node0_cmd = f"""awk '
+                        $1=="anon" {{ split($2,a,"="); split($3,b,"="); anon0=a[2]; anon1=b[2] }}
+                        $1=="file" {{ split($2,a,"="); split($3,b,"="); file0=a[2]; file1=b[2] }}
+                        END {{ print anon0+file0 }}
+                    ' {numa_stat_file}"""
+                    node0 = subprocess.check_output(node0_cmd, shell=True, text=True).strip()
+                    
+                    # node 1의 anon + file 계산
+                    node1_cmd = f"""awk '
+                        $1=="anon" {{ split($2,a,"="); split($3,b,"="); anon0=a[2]; anon1=b[2] }}
+                        $1=="file" {{ split($2,a,"="); split($3,b,"="); file0=a[2]; file1=b[2] }}
+                        END {{ print anon1+file1 }}
+                    ' {numa_stat_file}"""
+                    node1 = subprocess.check_output(node1_cmd, shell=True, text=True).strip()
+                    
+                    output_lines.append(f"{name}.memory.numa_stat.node0: {int(node0):,}")
+                    output_lines.append(f"{name}.memory.numa_stat.node1: {int(node1):,}")
+                
+                except FileNotFoundError:
+                    output_lines.append(f"{name}.memory.numa_stat: File not found.")
+                except (IOError, PermissionError) as e:
+                    output_lines.append(f"{name}.memory.numa_stat: Error reading file - {e}")
+                except subprocess.CalledProcessError as e:
+                    output_lines.append(f"{name}.memory.numa_stat: Error processing awk - {e}")
             
             output_lines.append("-" * 30)
             output_string = "\n".join(output_lines)

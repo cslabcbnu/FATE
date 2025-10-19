@@ -1,0 +1,9 @@
+[General]
+name='FIX_HPL_1'
+image='hpl'
+-itd
+--cpuset-cpus="16-31"
+
+[Memory_Control]
+type=fixed
+memory_tier0=48g

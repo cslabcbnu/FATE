@@ -1,9 +1,0 @@
-[General]
-name='Test_FATE'
-image='ubuntu'
--itd
-
-[Memory_Control]
-type=fixed
-memory_tier0=30g
-memory_tier1=10g

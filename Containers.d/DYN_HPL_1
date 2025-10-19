@@ -1,0 +1,9 @@
+[General]
+name='DYN_HPL_1'
+image='hpl'
+-itd
+--cpuset-cpus="48-63"
+
+[Memory_Control]
+type=dynamic
+memory_limit=64g
