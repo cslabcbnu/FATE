@@ -319,7 +319,8 @@ def monitor_containers(to_screen, to_file):
                         container_id = info['Id']
                         container_id_cache[name] = container_id
                     else:
-                        output_lines.append(f"{name}: Not running or not found.")
+                        output_lines.append(f"{name}.memory.numa_stat.node0: 0")
+                        output_lines.append(f"{name}.memory.numa_stat.node1: 0")
                         continue
                 
                 cgroup_path = f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope/"
@@ -349,7 +350,8 @@ def monitor_containers(to_screen, to_file):
                     output_lines.append(f"{name}.memory.numa_stat.node1: {int(node1):,}")
                 
                 except FileNotFoundError:
-                    output_lines.append(f"{name}.memory.numa_stat: File not found.")
+                    output_lines.append(f"{name}.memory.numa_stat.node0: 0")
+                    output_lines.append(f"{name}.memory.numa_stat.node1: 0")
                 except (IOError, PermissionError) as e:
                     output_lines.append(f"{name}.memory.numa_stat: Error reading file - {e}")
                 except subprocess.CalledProcessError as e:
@@ -402,6 +404,86 @@ def terminate_containers():
     print("[Info] Termination process complete.")
 
 
+def daemon_mode_loop(interval=10):
+    """Background mode: auto-detect container exits and rebalance dynamic memory."""
+    print("=" * 30 + "\n[Info] Starting Daemon Mode (Auto Memory Rebalance)\n" + "=" * 30)
+
+    last_states = {}
+    processed_stopped = set()  # ✅ 이미 처리된 정지 컨테이너를 저장
+    system_tiers = get_memory_tier_info()
+
+    while True:
+        try:
+            container_names = get_container_names_from_configs()
+            fixed, dynamic = [], []
+
+            for name in container_names:
+                info = get_container_info(name)
+                if not info:
+                    last_states[name] = "missing"
+                    continue
+
+                state = "running" if info['State']['Running'] else "stopped"
+
+                # 상태 변화 감지
+                if last_states.get(name) != state:
+                    print(f"[Event] Container '{name}' changed state: {last_states.get(name)} → {state}")
+                    last_states[name] = state
+
+                    # 꺼졌던 컨테이너가 다시 켜지면 processed 목록에서 제거
+                    if state == "running" and name in processed_stopped:
+                        processed_stopped.remove(name)
+
+                if state == "running":
+                    conf_files = [p for p in os.listdir('./Containers.d') if name in p]
+                    if not conf_files:
+                        continue
+                    cfg_path = os.path.join('./Containers.d', conf_files[0])
+                    cfg = configparser.ConfigParser()
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        all_lines = f.readlines()
+
+                    config_lines, standalone_options = [], []
+                    for line in all_lines:
+                        stripped = line.strip()
+                        if stripped.startswith('[') or '=' in stripped or not stripped:
+                            config_lines.append(line)
+                        elif stripped:
+                            standalone_options.append(stripped)
+
+                    cfg.read_string("".join(config_lines))
+                    if cfg.has_option('Memory_Control', 'type'):
+                        mem_type = cfg.get('Memory_Control', 'type')
+                        if mem_type == 'fixed':
+                            settings = {}
+                            for i in range(len(system_tiers)):
+                                key = f"memory_tier{i}"
+                                if cfg.has_option('Memory_Control', key):
+                                    settings[f"memory.tiered_memory_{i}_high"] = parse_memory_to_bytes(
+                                        cfg.get('Memory_Control', key)
+                                    )
+                            fixed.append({'id': info['Id'], 'name': name, 'settings': settings})
+                        elif mem_type == 'dynamic':
+                            limit_str = cfg.get('Memory_Control', 'memory_limit', fallback='0')
+                            dynamic.append({'id': info['Id'], 'name': name, 'limit_bytes': parse_memory_to_bytes(limit_str)})
+
+            # ✅ 변경된 부분: 이미 처리한 컨테이너 제외
+            stopped = [n for n, st in last_states.items() if st == "stopped" and n not in processed_stopped]
+            if stopped:
+                print(f"[Info] Detected stopped containers: {', '.join(stopped)} — Rebalancing dynamic memory...")
+                rebalance_dynamic_memory(dynamic, fixed, system_tiers)
+                processed_stopped.update(stopped)  # 처리 완료 표시
+
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            print("\n[Info] Daemon mode terminated by user.")
+            break
+        except Exception as e:
+            print(f"[Error] Daemon loop exception: {e}")
+            time.sleep(interval)
+
+
+
 if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(
@@ -417,11 +499,14 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--monitor', action='store_true', help='Monitor container memory usage on screen.')
     parser.add_argument('-f', '--file', action='store_true', help='Log container memory usage to a file.')
     parser.add_argument('-t', '--terminate', action='store_true', help='Stop and remove all managed containers.')
+    parser.add_argument('-d', '--daemon', action='store_true', help='Run in background mode to auto-rebalance when containers exit.')
     args = parser.parse_args()
 
     if args.monitor or args.file:
         monitor_containers(to_screen=args.monitor, to_file=args.file)
     elif args.terminate:
         terminate_containers()
+    elif args.daemon:
+        daemon_mode_loop(interval=10)
     else:
         run_docker_containers()
