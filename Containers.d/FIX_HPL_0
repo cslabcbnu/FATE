@@ -1,9 +1,0 @@
-[General]
-name='FIX_HPL_0'
-image='hpl'
--itd
---cpuset-cpus="0-15"
-
-[Memory_Control]
-type=fixed
-memory_tier0=48g

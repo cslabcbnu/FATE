@@ -73,7 +73,7 @@ def apply_memory_tiers(container_id, settings_to_apply):
             full_path = os.path.join(cgroup_path, file_name)
             if not os.path.exists(full_path):
                 print(f"[Alert] Cgroup file not found: {file_name}"); continue
-            print(f"[Info]     - Writing {int(byte_value)} bytes to {file_name}...")
+            print(f"[Info]      - Writing {int(byte_value)} bytes to {file_name}...")
             with open(full_path, 'w') as f: f.write(str(int(byte_value)))
         except PermissionError: print(f"[Error] Permission denied for {full_path}. Use sudo.")
         except Exception as e: print(f"[Error] Failed to apply setting for {file_name}: {e}")
@@ -151,7 +151,6 @@ def cleanup_old_backup_images(container_name):
     else:
         print(f"[Warning] Could not delete old backup images. Error: {delete_result.stderr.strip()}")
 
-
 def run_docker_containers(directory='./Containers.d'):
     if not os.path.isdir(directory): print(f"[Error] Directory '{directory}' not found."); return
     
@@ -175,8 +174,12 @@ def run_docker_containers(directory='./Containers.d'):
             config_lines, standalone_options = [], []
             for line in all_lines:
                 stripped = line.strip()
-                if stripped.startswith('[') or '=' in stripped or not stripped: config_lines.append(line)
-                elif stripped: standalone_options.append(stripped)
+                if stripped.startswith('-'):
+                    standalone_options.append(stripped)
+                elif stripped.startswith('[') or '=' in stripped or not stripped:
+                    config_lines.append(line)
+                elif stripped:
+                    standalone_options.append(stripped)
             
             config.read_string("".join(config_lines))
             current_config_hash = hashlib.sha256("".join(all_lines).encode('utf-8')).hexdigest()
@@ -190,6 +193,10 @@ def run_docker_containers(directory='./Containers.d'):
             recognized_configs += 1
             existing_info = get_container_info(container_name)
             
+            # [수정됨] 옵션에서 따옴표 제거 (Docker가 잘못된 형식을 인식하지 않도록 함)
+            # 예: --cpuset-cpus="32-47" -> --cpuset-cpus=32-47
+            parsed_options = [item.replace('"', '').replace("'", "") for opt in standalone_options for item in opt.split()]
+
             def handle_running_container(name, current_config):
                 info = get_container_info(name)
                 if not (info and info['State']['Running']): time.sleep(1); info = get_container_info(name)
@@ -212,12 +219,13 @@ def run_docker_containers(directory='./Containers.d'):
                         active_dynamic.append({'id': info['Id'], 'name': name, 'limit_bytes': parse_memory_to_bytes(limit_str)})
             
             if not existing_info:
-                command = ['docker', 'run', '--label', f'config.hash={current_config_hash}', '--name', container_name] + [item for opt in standalone_options for item in opt.split()] + [image]
+                # [수정됨] parsed_options 사용
+                command = ['docker', 'run', '--label', f'config.hash={current_config_hash}', '--name', container_name] + parsed_options + [image]
                 result = subprocess.run(command, capture_output=True, text=True)
                 if result.returncode == 0:
                     containers_started += 1; print(f"[Info] Success: New container '{container_name}' started.")
                     handle_running_container(container_name, config)
-                else: print(f"[Error] Failure creating '{container_name}'.\n[Error]    - {result.stderr.strip()}")
+                else: print(f"[Error] Failure creating '{container_name}'.\n[Error]     - {result.stderr.strip()}")
             else:
                 if existing_info['Config']['Labels'].get('config.hash') == current_config_hash:
                     if existing_info['State']['Running']:
@@ -228,7 +236,7 @@ def run_docker_containers(directory='./Containers.d'):
                         if result.returncode == 0:
                             containers_started += 1; print(f"[Info] Success: Container '{container_name}' started.")
                             handle_running_container(container_name, config)
-                        else: print(f"[Error] Failure starting '{container_name}'.\n[Error]    - {result.stderr.strip()}")
+                        else: print(f"[Error] Failure starting '{container_name}'.\n[Error]     - {result.stderr.strip()}")
                 else:
                     print(f"[Info] Config for '{container_name}' changed. Recreating.")
                     timestamp = datetime.now().strftime('%Y%m%d%H%M%S'); backup_image_name = f"{container_name.lower()}_{timestamp}"
@@ -240,7 +248,9 @@ def run_docker_containers(directory='./Containers.d'):
                         subprocess.run(['docker', 'rm', container_name], check=True, capture_output=True)
                         print(f"[Info] Removed old container '{container_name}'.")
                         cleanup_old_backup_images(container_name)
-                        command = ['docker', 'run', '--label', f'config.hash={current_config_hash}', '--name', container_name] + [item for opt in standalone_options for item in opt.split()] + [backup_image_name]
+                        
+                        # [수정됨] parsed_options 사용
+                        command = ['docker', 'run', '--label', f'config.hash={current_config_hash}', '--name', container_name] + parsed_options + [backup_image_name]
                         result = subprocess.run(command, capture_output=True, text=True)
                         if result.returncode == 0:
                             containers_started += 1; print(f"[Info] Success: Recreated container '{container_name}'.")
@@ -270,11 +280,12 @@ def get_container_names_from_configs(directory='./Containers.d'):
             config_lines = []
             for line in all_lines:
                 stripped = line.strip()
+                # 여기서는 이름만 추출하면 되므로 옵션 파싱 로직은 크게 중요치 않으나 일관성 유지
                 if stripped.startswith('[') or '=' in stripped or not stripped:
                     config_lines.append(line)
 
             config = configparser.ConfigParser()
-            config.read_string("".join(config_lines)) # Read only the filtered lines
+            config.read_string("".join(config_lines)) 
 
             if config.has_option('General', 'name'):
                 names.append(config.get('General', 'name').strip("'\""))
@@ -446,7 +457,10 @@ def daemon_mode_loop(interval=10):
                     config_lines, standalone_options = [], []
                     for line in all_lines:
                         stripped = line.strip()
-                        if stripped.startswith('[') or '=' in stripped or not stripped:
+                        # Daemon 모드에서도 파싱 로직 일관성 유지
+                        if stripped.startswith('-'):
+                            standalone_options.append(stripped)
+                        elif stripped.startswith('[') or '=' in stripped or not stripped:
                             config_lines.append(line)
                         elif stripped:
                             standalone_options.append(stripped)
@@ -490,11 +504,11 @@ if __name__ == '__main__':
         description="A tool to manage and monitor Docker containers with specific controls for tiered memory systems.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""Usage examples:
-  sudo python3 FATE.py               # Start/update containers based on config files.
-  sudo python3 FATE.py -m            # Monitor memory usage on the screen.
-  sudo python3 FATE.py -m -f         # Monitor on screen AND log to a file.
-  sudo python3 FATE.py -t            # Stop and remove all managed containers.
-  sudo python3 FATE.py --help        # Show this help message."""
+  sudo python3 FATE.py                # Start/update containers based on config files.
+  sudo python3 FATE.py -m             # Monitor memory usage on the screen.
+  sudo python3 FATE.py -m -f          # Monitor on screen AND log to a file.
+  sudo python3 FATE.py -t             # Stop and remove all managed containers.
+  sudo python3 FATE.py --help         # Show this help message."""
     )
     parser.add_argument('-m', '--monitor', action='store_true', help='Monitor container memory usage on screen.')
     parser.add_argument('-f', '--file', action='store_true', help='Log container memory usage to a file.')

@@ -1,9 +1,0 @@
-[General]
-name='DYN_7zip_0'
-image='7zip'
--itd
---cpuset-cpus="64-79"
-
-[Memory_Control]
-type=dynamic
-memory_limit=64g
