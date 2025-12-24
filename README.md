@@ -1,4 +1,4 @@
-# FATE: Fairness-aware Allocation of containers in Tiered-memory Environment
+# FATE: Fairness-Aware memory allocation for containers in Tiered memory Environments
 
 **FATE** is a system designed to achieve fair and efficient allocation of containers in a NUMA (Non-Uniform Memory Access) tiered-memory environment. It modifies the Linux kernel's `memcg` (memory control group) to track memory usage on a per-tier basis and utilizes this information to schedule containers to their optimal locations.
 
